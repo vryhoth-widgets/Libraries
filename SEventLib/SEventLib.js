@@ -1,7 +1,15 @@
 (function (global) {
     const VERSION = "1.0";
     const LIB = "[SEventLib.js " + VERSION + "]";
-    let DEBUG = true;
+
+    const config = {
+        debug: true,
+        commandPrefix: "!",
+        hideCommands: "no",
+        ignoredUsers: [],
+        botNames: [],
+        dedupeWindowMs: 1500
+    };
 
     const state = {
         lastEvents: new Map(),
@@ -15,7 +23,7 @@
     }
 
     function log(data) {
-        if (DEBUG) console.log(LIB, data);
+        if (config.debug) console.log(LIB, data);
     }
 
     function dedupe(key, windowMs) {
@@ -26,36 +34,43 @@
         return false;
     }
 
-    function parseCommand(text, prefix) {
-        if (!text || !text.startsWith(prefix)) return null;
-        const raw = text.slice(prefix.length).trim();
+    function parseCommand(text) {
+        if (!text || !text.startsWith(config.commandPrefix)) return null;
+        const raw = text.slice(config.commandPrefix.length).trim();
         if (!raw) return null;
         const parts = raw.split(/\s+/);
         return {
-            prefix,
+            prefix: config.commandPrefix,
             name: parts.shift(),
-            args: parts
+            args: parts,
+            raw: text
         };
     }
 
-    function init(options) {
-        DEBUG = options?.debug !== false;
+    function init(options = {}) {
+        Object.assign(config, options);
     }
 
-    function normalize(detail, opts) {
-        const {
-            commandPrefix = "!",
-            hideCommands = "no",
-            ignoredUsers = [],
-            botNames = [],
-            dedupeWindowMs = 1500
-        } = opts || {};
-
+    function normalize(detail) {
         if (!detail || !detail.listener) return null;
 
         const listener = detail.listener;
         const ev = detail.event || {};
         const ts = now();
+
+        if (listener === "event:test" && ev.listener === "widget-button") {
+            const out = {
+                type: "button",
+                source: "widget",
+                listener: "widget-button",
+                timestamp: ts,
+                field: ev.field,
+                value: ev.value,
+                raw: detail
+            };
+            log(out);
+            return out;
+        }
 
         if (listener === "event" && ev.type === "channelPointsRedemption") {
             state.lastChannelPointUser = ev.data?.username || null;
@@ -87,18 +102,18 @@
 
             if (
                 state.lastChannelPointUser === d.displayName &&
-                ts - state.lastChannelPointTs < 500
+                ts - state.lastChannelPointTs < 800
             ) {
                 return null;
             }
 
-            if (ignoredUsers.includes(d.nick)) return null;
+            if (config.ignoredUsers.includes(d.nick)) return null;
 
-            const cmd = parseCommand(d.text, commandPrefix);
-            if (cmd && hideCommands === "yes") return null;
+            const cmd = parseCommand(d.text);
+            if (cmd && config.hideCommands === "yes") return null;
 
             const role =
-                botNames.includes(d.nick) ? "bot" :
+                config.botNames.includes(d.nick) ? "bot" :
                 d.tags?.badges?.includes("broadcaster") ? "broadcaster" :
                 d.tags?.badges?.includes("mod") ? "mod" :
                 d.tags?.badges?.includes("vip") ? "vip" :
@@ -168,7 +183,6 @@
                     listener,
                     origin: "event",
                     timestamp: ts,
-                    amount: null,
                     user: {
                         username: ev.name,
                         displayName: ev.name
@@ -188,7 +202,7 @@
 
             if (meta.bulkGifted === true && amt > 1) {
                 const key = "sub-community-" + meta.sender + "-" + amt;
-                if (dedupe(key, dedupeWindowMs)) return null;
+                if (dedupe(key, config.dedupeWindowMs)) return null;
 
                 const out = {
                     type: "sub-community",
@@ -210,9 +224,7 @@
                 return out;
             }
 
-            if (meta.gifted === true) {
-                if (meta.isCommunityGift) return null;
-
+            if (meta.gifted === true && !meta.isCommunityGift) {
                 const out = {
                     type: "sub-gift",
                     source: "alert",
@@ -310,7 +322,7 @@
         }
 
         if (listener === "follower-latest") {
-            if (dedupe("follow-" + ev.name, dedupeWindowMs)) return null;
+            if (dedupe("follow-" + ev.name, config.dedupeWindowMs)) return null;
 
             const out = {
                 type: "follow",
