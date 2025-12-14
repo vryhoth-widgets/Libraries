@@ -1,9 +1,13 @@
 (function (global) {
     const VERSION = "1.0";
     const LIB = "[SEventLib.js " + VERSION + "]";
+    let DEBUG = true;
+
     const state = {
         lastEvents: new Map(),
-        communityLocks: new Set()
+        communityLocks: new Set(),
+        lastChannelPointUser: null,
+        lastChannelPointTs: 0
     };
 
     function now() {
@@ -11,7 +15,7 @@
     }
 
     function log(data) {
-        console.log(LIB, data);
+        if (DEBUG) console.log(LIB, data);
     }
 
     function dedupe(key, windowMs) {
@@ -34,6 +38,10 @@
         };
     }
 
+    function init(options) {
+        DEBUG = options?.debug !== false;
+    }
+
     function normalize(detail, opts) {
         const {
             commandPrefix = "!",
@@ -49,9 +57,41 @@
         const ev = detail.event || {};
         const ts = now();
 
+        if (listener === "event" && ev.type === "channelPointsRedemption") {
+            state.lastChannelPointUser = ev.data?.username || null;
+            state.lastChannelPointTs = ts;
+
+            const out = {
+                type: "points",
+                source: "alert",
+                listener,
+                origin: "event",
+                timestamp: ts,
+                amount: ev.data?.amount || 0,
+                message: ev.data?.message || "",
+                user: {
+                    username: ev.data?.username,
+                    displayName: ev.data?.username
+                },
+                meta: ev.meta || {},
+                raw: detail
+            };
+
+            log(out);
+            return out;
+        }
+
         if (listener === "message") {
             const d = ev.data;
             if (!d) return null;
+
+            if (
+                state.lastChannelPointUser === d.displayName &&
+                ts - state.lastChannelPointTs < 500
+            ) {
+                return null;
+            }
+
             if (ignoredUsers.includes(d.nick)) return null;
 
             const cmd = parseCommand(d.text, commandPrefix);
@@ -94,26 +134,6 @@
         }
 
         if (listener === "event") {
-            if (ev.type === "channelPointsRedemption") {
-                const out = {
-                    type: "points",
-                    source: "alert",
-                    listener,
-                    origin: "event",
-                    timestamp: ts,
-                    amount: ev.data?.amount || 0,
-                    message: ev.data?.message || "",
-                    user: {
-                        username: ev.data?.username,
-                        displayName: ev.data?.username
-                    },
-                    meta: ev.meta || {},
-                    raw: detail
-                };
-                log(out);
-                return out;
-            }
-
             if (ev.isCommunityGift) {
                 const gid = ev.activityId || ev.meta?.activityId || ev.createdAt;
                 if (state.communityLocks.has(gid)) return null;
@@ -136,6 +156,7 @@
                     meta: ev.meta || {},
                     raw: detail
                 };
+
                 log(out);
                 return out;
             }
@@ -155,6 +176,7 @@
                     meta: ev.meta || {},
                     raw: detail
                 };
+
                 log(out);
                 return out;
             }
@@ -180,9 +202,10 @@
                         displayName: meta.sender,
                         sender: meta.sender
                     },
-                    meta: meta,
+                    meta,
                     raw: detail
                 };
+
                 log(out);
                 return out;
             }
@@ -202,9 +225,10 @@
                         displayName: meta.name,
                         sender: meta.sender
                     },
-                    meta: meta,
+                    meta,
                     raw: detail
                 };
+
                 log(out);
                 return out;
             }
@@ -221,9 +245,10 @@
                     username: meta.name,
                     displayName: meta.name
                 },
-                meta: meta,
+                meta,
                 raw: detail
             };
+
             log(out);
             return out;
         }
@@ -242,6 +267,7 @@
                 },
                 raw: detail
             };
+
             log(out);
             return out;
         }
@@ -260,6 +286,7 @@
                 },
                 raw: detail
             };
+
             log(out);
             return out;
         }
@@ -277,12 +304,14 @@
                 },
                 raw: detail
             };
+
             log(out);
             return out;
         }
 
         if (listener === "follower-latest") {
             if (dedupe("follow-" + ev.name, dedupeWindowMs)) return null;
+
             const out = {
                 type: "follow",
                 source: "alert",
@@ -294,6 +323,7 @@
                 },
                 raw: detail
             };
+
             log(out);
             return out;
         }
@@ -302,6 +332,7 @@
     }
 
     global.SEventLib = {
+        init,
         normalize,
         version: VERSION
     };
