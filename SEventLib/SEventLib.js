@@ -1,297 +1,308 @@
 (function (global) {
     const VERSION = "1.0";
-
-    const DEFAULT_OPTIONS = {
-        commandPrefix: "!",
-        hideCommands: "no",
-        ignoredUsers: [],
-        botNames: [],
-        dedupeWindowMs: 1500,
-        debug: true
+    const LIB = "[SEventLib.js " + VERSION + "]";
+    const state = {
+        lastEvents: new Map(),
+        communityLocks: new Set()
     };
-
-    const _dedupeCache = new Map();
-    const _communityLocks = new Map();
 
     function now() {
         return Date.now();
     }
 
-    function logDebug(...args) {
-        if (SEventLib.options.debug) {
-            console.log("[SEventLib]", ...args);
-        }
+    function log(data) {
+        console.log(LIB, data);
     }
 
-    function dedupe(key) {
+    function dedupe(key, windowMs) {
         const t = now();
-        const last = _dedupeCache.get(key);
-        if (last && t - last < SEventLib.options.dedupeWindowMs) {
-            return true;
-        }
-        _dedupeCache.set(key, t);
+        const last = state.lastEvents.get(key);
+        if (last && t - last < windowMs) return true;
+        state.lastEvents.set(key, t);
         return false;
     }
 
-    function normalizeUserFromEvent(ev) {
+    function parseCommand(text, prefix) {
+        if (!text || !text.startsWith(prefix)) return null;
+        const raw = text.slice(prefix.length).trim();
+        if (!raw) return null;
+        const parts = raw.split(/\s+/);
         return {
-            username: ev.name || ev.username || "",
-            displayName: ev.displayName || ev.name || "",
-            providerId: ev.providerId || "",
-            sender: ev.sender || ""
+            prefix,
+            name: parts.shift(),
+            args: parts
         };
     }
 
-    function normalizeChat(detail) {
-        const d = detail.event.data;
-        if (!d || !d.text) return null;
+    function normalize(detail, opts) {
+        const {
+            commandPrefix = "!",
+            hideCommands = "no",
+            ignoredUsers = [],
+            botNames = [],
+            dedupeWindowMs = 1500
+        } = opts || {};
 
-        if (
-            SEventLib.options.hideCommands === "yes" &&
-            d.text.startsWith(SEventLib.options.commandPrefix)
-        ) {
-            return null;
-        }
+        if (!detail || !detail.listener) return null;
 
-        if (SEventLib.options.ignoredUsers.includes(d.nick)) return null;
+        const listener = detail.listener;
+        const ev = detail.event || {};
+        const ts = now();
 
-        const isCommand = d.text.startsWith(SEventLib.options.commandPrefix);
-        let command = null;
+        if (listener === "message") {
+            const d = ev.data;
+            if (!d) return null;
+            if (ignoredUsers.includes(d.nick)) return null;
 
-        if (isCommand) {
-            const raw = d.text.slice(SEventLib.options.commandPrefix.length);
-            const parts = raw.split(/\s+/);
-            command = {
-                prefix: SEventLib.options.commandPrefix,
-                name: parts.shift() || "",
-                args: parts,
-                raw: d.text
-            };
-        }
+            const cmd = parseCommand(d.text, commandPrefix);
+            if (cmd && hideCommands === "yes") return null;
 
-        return {
-            type: "message",
-            source: "chat",
-            listener: "message",
-            origin: "message",
-            timestamp: now(),
-            user: {
-                username: d.nick,
-                displayName: d.displayName,
-                userId: d.userId,
-                color: d.color || ""
-            },
-            role: d.tags?.badges || [],
-            message: {
-                text: d.text,
-                renderedText: detail.event.renderedText || d.text,
-                isAction: d.isAction || false,
-                isHighlight: d.tags?.["msg-id"] === "highlighted-message",
-                isFirst: Number(d.tags?.["first-msg"]) === 1
-            },
-            command,
-            raw: detail
-        };
-    }
+            const role =
+                botNames.includes(d.nick) ? "bot" :
+                d.tags?.badges?.includes("broadcaster") ? "broadcaster" :
+                d.tags?.badges?.includes("mod") ? "mod" :
+                d.tags?.badges?.includes("vip") ? "vip" :
+                d.tags?.badges?.includes("subscriber") || d.tags?.badges?.includes("founder") ? "subscriber" :
+                Number(d.tags?.["first-msg"]) === 1 ? "first" :
+                "viewer";
 
-    function normalizeFollow(detail) {
-        return {
-            type: "follow",
-            source: "alert",
-            listener: detail.listener,
-            origin: detail.listener === "event" ? "event" : "latest",
-            timestamp: now(),
-            user: normalizeUserFromEvent(detail.event),
-            amount: null,
-            message: "",
-            raw: detail
-        };
-    }
-
-    function normalizeSub(detail) {
-        const ev = detail.event;
-        const isEvent = detail.listener === "event";
-        const isLatest = detail.listener === "subscriber-latest";
-
-        const activityGroup = ev.activityGroup || "";
-        const activityId = ev.activityId || ev._id || "";
-
-        if (isEvent && activityGroup) {
-            if (_communityLocks.has(activityGroup)) return null;
-            _communityLocks.set(activityGroup, true);
-
-            return {
-                type: "sub-community",
-                source: "alert",
-                listener: "event",
-                origin: "event",
-                timestamp: now(),
-                activityGroup,
-                activityId,
-                amount: ev.amount || ev.count || 1,
+            const out = {
+                type: "message",
+                source: "chat",
+                listener,
+                timestamp: ts,
                 user: {
-                    username: ev.sender || "",
-                    displayName: ev.sender || "",
-                    providerId: ev.providerId || "",
-                    sender: ev.sender || ""
+                    username: d.nick,
+                    displayName: d.displayName,
+                    userId: d.userId,
+                    color: d.tags?.color || ""
                 },
-                message: ev.message || "",
-                meta: ev,
+                role,
+                message: {
+                    text: d.text,
+                    renderedText: ev.renderedText,
+                    isAction: d.isAction,
+                    isHighlight: d.tags?.["msg-id"] === "highlighted-message",
+                    isFirst: Number(d.tags?.["first-msg"]) === 1
+                },
+                command: cmd,
                 raw: detail
             };
+
+            log(out);
+            return out;
         }
 
-        if (isLatest) {
-            return null;
+        if (listener === "event") {
+            if (ev.type === "channelPointsRedemption") {
+                const out = {
+                    type: "points",
+                    source: "alert",
+                    listener,
+                    origin: "event",
+                    timestamp: ts,
+                    amount: ev.data?.amount || 0,
+                    message: ev.data?.message || "",
+                    user: {
+                        username: ev.data?.username,
+                        displayName: ev.data?.username
+                    },
+                    meta: ev.meta || {},
+                    raw: detail
+                };
+                log(out);
+                return out;
+            }
+
+            if (ev.isCommunityGift) {
+                const gid = ev.activityId || ev.meta?.activityId || ev.createdAt;
+                if (state.communityLocks.has(gid)) return null;
+                state.communityLocks.add(gid);
+
+                const out = {
+                    type: "sub-community",
+                    source: "alert",
+                    listener,
+                    origin: "event",
+                    timestamp: ts,
+                    amount: ev.amount || ev.bulkGifted || 0,
+                    activityId: gid,
+                    activityGroup: ev.activityGroup || "",
+                    user: {
+                        username: ev.sender,
+                        displayName: ev.sender,
+                        sender: ev.sender
+                    },
+                    meta: ev.meta || {},
+                    raw: detail
+                };
+                log(out);
+                return out;
+            }
+
+            if (ev.name) {
+                const out = {
+                    type: "follow",
+                    source: "alert",
+                    listener,
+                    origin: "event",
+                    timestamp: ts,
+                    amount: null,
+                    user: {
+                        username: ev.name,
+                        displayName: ev.name
+                    },
+                    meta: ev.meta || {},
+                    raw: detail
+                };
+                log(out);
+                return out;
+            }
         }
 
-        if (isEvent) {
-            const amount = ev.amount || 1;
-            let type = "sub-new";
-            if (amount > 1) type = "sub-re";
-            if (ev.gifted === true) type = "sub-gift";
+        if (listener === "subscriber-latest") {
+            const meta = ev;
+            const amt = meta.amount || 1;
 
-            return {
-                type,
+            if (meta.bulkGifted === true && amt > 1) {
+                const key = "sub-community-" + meta.sender + "-" + amt;
+                if (dedupe(key, dedupeWindowMs)) return null;
+
+                const out = {
+                    type: "sub-community",
+                    source: "alert",
+                    listener,
+                    origin: "latest",
+                    timestamp: ts,
+                    amount: amt,
+                    user: {
+                        username: meta.sender,
+                        displayName: meta.sender,
+                        sender: meta.sender
+                    },
+                    meta: meta,
+                    raw: detail
+                };
+                log(out);
+                return out;
+            }
+
+            if (meta.gifted === true) {
+                if (meta.isCommunityGift) return null;
+
+                const out = {
+                    type: "sub-gift",
+                    source: "alert",
+                    listener,
+                    origin: "latest",
+                    timestamp: ts,
+                    amount: 1,
+                    user: {
+                        username: meta.name,
+                        displayName: meta.name,
+                        sender: meta.sender
+                    },
+                    meta: meta,
+                    raw: detail
+                };
+                log(out);
+                return out;
+            }
+
+            const out = {
+                type: amt > 1 ? "sub-re" : "sub-new",
                 source: "alert",
-                listener: "event",
-                origin: "event",
-                timestamp: now(),
-                activityGroup: "",
-                activityId,
-                amount,
-                user: normalizeUserFromEvent(ev),
-                message: ev.message || "",
-                meta: ev,
+                listener,
+                origin: "latest",
+                timestamp: ts,
+                amount: amt,
+                message: meta.message || "",
+                user: {
+                    username: meta.name,
+                    displayName: meta.name
+                },
+                meta: meta,
                 raw: detail
             };
+            log(out);
+            return out;
+        }
+
+        if (listener === "cheer-latest") {
+            const out = {
+                type: "cheer",
+                source: "alert",
+                listener,
+                timestamp: ts,
+                amount: ev.amount || 0,
+                message: ev.message || "",
+                user: {
+                    username: ev.name,
+                    displayName: ev.name
+                },
+                raw: detail
+            };
+            log(out);
+            return out;
+        }
+
+        if (listener === "tip-latest") {
+            const out = {
+                type: "tip",
+                source: "alert",
+                listener,
+                timestamp: ts,
+                amount: ev.amount || 0,
+                message: ev.message || "",
+                user: {
+                    username: ev.name,
+                    displayName: ev.name
+                },
+                raw: detail
+            };
+            log(out);
+            return out;
+        }
+
+        if (listener === "raid-latest") {
+            const out = {
+                type: "raid",
+                source: "alert",
+                listener,
+                timestamp: ts,
+                amount: ev.amount || 0,
+                user: {
+                    username: ev.name,
+                    displayName: ev.name
+                },
+                raw: detail
+            };
+            log(out);
+            return out;
+        }
+
+        if (listener === "follower-latest") {
+            if (dedupe("follow-" + ev.name, dedupeWindowMs)) return null;
+            const out = {
+                type: "follow",
+                source: "alert",
+                listener,
+                timestamp: ts,
+                user: {
+                    username: ev.name,
+                    displayName: ev.name
+                },
+                raw: detail
+            };
+            log(out);
+            return out;
         }
 
         return null;
     }
 
-    function normalizeCheer(detail) {
-        const ev = detail.event;
-        return {
-            type: "cheer",
-            source: "alert",
-            listener: detail.listener,
-            origin: "latest",
-            timestamp: now(),
-            amount: ev.amount || 0,
-            user: normalizeUserFromEvent(ev),
-            message: ev.message || "",
-            raw: detail
-        };
-    }
-
-    function normalizeTip(detail) {
-        const ev = detail.event;
-        return {
-            type: "tip",
-            source: "alert",
-            listener: detail.listener,
-            origin: "latest",
-            timestamp: now(),
-            amount: ev.amount || 0,
-            user: normalizeUserFromEvent(ev),
-            message: ev.message || "",
-            raw: detail
-        };
-    }
-
-    function normalizeRaid(detail) {
-        const ev = detail.event;
-        return {
-            type: "raid",
-            source: "alert",
-            listener: detail.listener,
-            origin: "latest",
-            timestamp: now(),
-            amount: ev.amount || 0,
-            user: normalizeUserFromEvent(ev),
-            message: "",
-            raw: detail
-        };
-    }
-
-    function normalizePoints(detail) {
-        const ev = detail.event;
-        if (ev.type !== "channelPointsRedemption") return null;
-
-        return {
-            type: "points",
-            source: "alert",
-            listener: "event",
-            origin: "event",
-            timestamp: now(),
-            amount: ev.data.amount,
-            user: {
-                username: ev.data.username,
-                displayName: ev.data.displayName,
-                providerId: ev.data.providerId
-            },
-            message: ev.data.message || "",
-            meta: {
-                redemption: ev.data.redemption,
-                quantity: ev.data.quantity || 0
-            },
-            raw: detail
-        };
-    }
-
-    function normalize(detail, options = {}) {
-        SEventLib.options = { ...DEFAULT_OPTIONS, ...options };
-
-        if (!detail || !detail.listener) return null;
-
-        let result = null;
-
-        switch (detail.listener) {
-            case "message":
-                result = normalizeChat(detail);
-                break;
-
-            case "follower-latest":
-            case "event":
-                if (detail.event?.type === "channelPointsRedemption") {
-                    result = normalizePoints(detail);
-                } else if (detail.listener === "event" || detail.listener === "follower-latest") {
-                    result = normalizeFollow(detail);
-                }
-                break;
-
-            case "subscriber-latest":
-                result = normalizeSub(detail);
-                break;
-
-            case "cheer-latest":
-                result = normalizeCheer(detail);
-                break;
-
-            case "tip-latest":
-                result = normalizeTip(detail);
-                break;
-
-            case "raid-latest":
-                result = normalizeRaid(detail);
-                break;
-        }
-
-        if (!result) return null;
-
-        const key = `${result.type}:${result.listener}:${result.timestamp}`;
-        if (dedupe(key)) return null;
-
-        logDebug(result);
-        return result;
-    }
-
-    const SEventLib = {
-        version: VERSION,
-        options: { ...DEFAULT_OPTIONS },
-        normalize
+    global.SEventLib = {
+        normalize,
+        version: VERSION
     };
-
-    global.SEventLib = SEventLib;
 })(window);
