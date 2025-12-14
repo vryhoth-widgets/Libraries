@@ -1,21 +1,21 @@
 (function (global) {
     const VERSION = "1.0";
     const LIB = "[SEventLib.js " + VERSION + "]";
-
-    const config = {
-        debug: true,
-        commandPrefix: "!",
-        hideCommands: "no",
-        ignoredUsers: [],
-        botNames: [],
-        dedupeWindowMs: 1500
-    };
+    let DEBUG = true;
 
     const state = {
         lastEvents: new Map(),
         communityLocks: new Set(),
         lastChannelPointUser: null,
-        lastChannelPointTs: 0
+        lastChannelPointMsg: null,
+        lastChannelPointTs: 0,
+        initOpts: {
+            commandPrefix: "!",
+            hideCommands: "no",
+            ignoredUsers: [],
+            botNames: [],
+            dedupeWindowMs: 1500
+        }
     };
 
     function now() {
@@ -23,7 +23,7 @@
     }
 
     function log(data) {
-        if (config.debug) console.log(LIB, data);
+        if (DEBUG) console.log(LIB, data);
     }
 
     function dedupe(key, windowMs) {
@@ -34,46 +34,69 @@
         return false;
     }
 
-    function parseCommand(text) {
-        if (!text || !text.startsWith(config.commandPrefix)) return null;
-        const raw = text.slice(config.commandPrefix.length).trim();
+    function parseCommand(text, prefix) {
+        if (!text || !text.startsWith(prefix)) return null;
+        const raw = text.slice(prefix.length).trim();
         if (!raw) return null;
         const parts = raw.split(/\s+/);
         return {
-            prefix: config.commandPrefix,
+            prefix,
             name: parts.shift(),
-            args: parts,
-            raw: text
+            args: parts
         };
     }
 
-    function init(options = {}) {
-        Object.assign(config, options);
+    function init(options) {
+        DEBUG = options?.debug !== false;
+        if (!options) return;
+
+        if (Object.prototype.hasOwnProperty.call(options, "commandPrefix")) state.initOpts.commandPrefix = options.commandPrefix;
+        if (Object.prototype.hasOwnProperty.call(options, "hideCommands")) state.initOpts.hideCommands = options.hideCommands;
+        if (Object.prototype.hasOwnProperty.call(options, "ignoredUsers")) state.initOpts.ignoredUsers = Array.isArray(options.ignoredUsers) ? options.ignoredUsers : [];
+        if (Object.prototype.hasOwnProperty.call(options, "botNames")) state.initOpts.botNames = Array.isArray(options.botNames) ? options.botNames : [];
+        if (Object.prototype.hasOwnProperty.call(options, "dedupeWindowMs")) state.initOpts.dedupeWindowMs = options.dedupeWindowMs;
     }
 
-    function normalize(detail) {
+    function normalize(detail, opts) {
+        const merged = Object.assign({}, state.initOpts, opts || {});
+        const {
+            commandPrefix = "!",
+            hideCommands = "no",
+            ignoredUsers = [],
+            botNames = [],
+            dedupeWindowMs = 1500
+        } = merged || {};
+
         if (!detail || !detail.listener) return null;
 
         const listener = detail.listener;
         const ev = detail.event || {};
         const ts = now();
 
-        if (listener === "event:test" && ev.listener === "widget-button") {
+        if (listener && listener.startsWith("event") && ev.listener === "widget-button") {
+            const k = "widget-button-" + (ev.field || "") + "-" + (ev.value || "");
+            if (dedupe(k, dedupeWindowMs)) return null;
+
             const out = {
                 type: "button",
                 source: "widget",
                 listener: "widget-button",
                 timestamp: ts,
-                field: ev.field,
-                value: ev.value,
+                field: ev.field || "",
+                value: ev.value || "",
                 raw: detail
             };
+
             log(out);
             return out;
         }
 
         if (listener === "event" && ev.type === "channelPointsRedemption") {
-            state.lastChannelPointUser = ev.data?.username || null;
+            const u = (ev.data?.username || "").toString();
+            const m = (ev.data?.message || "").toString();
+
+            state.lastChannelPointUser = u ? u.toLowerCase() : null;
+            state.lastChannelPointMsg = m || null;
             state.lastChannelPointTs = ts;
 
             const out = {
@@ -83,7 +106,7 @@
                 origin: "event",
                 timestamp: ts,
                 amount: ev.data?.amount || 0,
-                message: ev.data?.message || "",
+                message: m,
                 user: {
                     username: ev.data?.username,
                     displayName: ev.data?.username
@@ -100,20 +123,22 @@
             const d = ev.data;
             if (!d) return null;
 
-            if (
-                state.lastChannelPointUser === d.displayName &&
-                ts - state.lastChannelPointTs < 800
-            ) {
+            const dn = (d.nick || d.displayName || "").toString().toLowerCase();
+            const cpU = state.lastChannelPointUser;
+            const cpM = state.lastChannelPointMsg;
+            const dt = ts - state.lastChannelPointTs;
+
+            if (cpU && dn && dn === cpU && dt < 1500 && cpM && (d.text || "") === cpM) {
                 return null;
             }
 
-            if (config.ignoredUsers.includes(d.nick)) return null;
+            if (ignoredUsers.includes(d.nick)) return null;
 
-            const cmd = parseCommand(d.text);
-            if (cmd && config.hideCommands === "yes") return null;
+            const cmd = parseCommand(d.text, commandPrefix);
+            if (cmd && hideCommands === "yes") return null;
 
             const role =
-                config.botNames.includes(d.nick) ? "bot" :
+                botNames.includes(d.nick) ? "bot" :
                 d.tags?.badges?.includes("broadcaster") ? "broadcaster" :
                 d.tags?.badges?.includes("mod") ? "mod" :
                 d.tags?.badges?.includes("vip") ? "vip" :
@@ -183,6 +208,7 @@
                     listener,
                     origin: "event",
                     timestamp: ts,
+                    amount: null,
                     user: {
                         username: ev.name,
                         displayName: ev.name
@@ -202,7 +228,7 @@
 
             if (meta.bulkGifted === true && amt > 1) {
                 const key = "sub-community-" + meta.sender + "-" + amt;
-                if (dedupe(key, config.dedupeWindowMs)) return null;
+                if (dedupe(key, dedupeWindowMs)) return null;
 
                 const out = {
                     type: "sub-community",
@@ -224,7 +250,9 @@
                 return out;
             }
 
-            if (meta.gifted === true && !meta.isCommunityGift) {
+            if (meta.gifted === true) {
+                if (meta.isCommunityGift) return null;
+
                 const out = {
                     type: "sub-gift",
                     source: "alert",
@@ -322,7 +350,7 @@
         }
 
         if (listener === "follower-latest") {
-            if (dedupe("follow-" + ev.name, config.dedupeWindowMs)) return null;
+            if (dedupe("follow-" + ev.name, dedupeWindowMs)) return null;
 
             const out = {
                 type: "follow",
